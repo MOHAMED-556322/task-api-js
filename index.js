@@ -1,11 +1,14 @@
+require("dotenv").config();
+
 const express = require("express");
 const { Pool } = require("pg");
+const { createClient } = require("@supabase/supabase-js");
 
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
@@ -15,7 +18,16 @@ const options = {
     info: {
       title: "Task API",
       version: "1.0.0",
-      description: "Simple CRUD API with Express and PostgreSQL"
+      description: "Simple CRUD API with Express, PostgreSQL, and Supabase Auth"
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT"
+        }
+      }
     }
   },
   apis: ["./index.js"]
@@ -23,7 +35,10 @@ const options = {
 
 const swaggerSpec = swaggerJsdoc(options);
 
-// ---- Stage 1: connect to Postgres using DATABASE_URL from .env ----
+// ---- Supabase Auth client ----
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// ---- Postgres connection for tasks ----
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
@@ -62,11 +77,35 @@ async function initDb() {
 }
 
 initDb()
-  .then(() => console.log("Database ready"))
+  .then(() => console.log("Database ready. Connected to Supabase."))
   .catch((err) => {
     console.error("Failed to initialize database:", err);
     process.exit(1);
   });
+
+// ---- Stage 4: reusable auth middleware ----
+async function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ") || authHeader.split(" ")[1].trim() === "") {
+    return res.status(401).json({
+      error: "Access token required"
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  const { data, error } = await supabase.auth.getUser(token);
+
+  if (error || !data.user) {
+    return res.status(401).json({
+      error: "Invalid or expired token"
+    });
+  }
+
+  req.user = data.user;
+  next();
+}
 
 /**
  * @swagger
@@ -82,7 +121,7 @@ app.get("/", (req, res) => {
   res.json({
     name: "Task API",
     version: "1.0",
-    endpoints: ["/tasks"]
+    endpoints: ["/tasks", "/auth/signup", "/auth/login", "/auth/logout", "/public/info", "/protected/profile"]
   });
 });
 
@@ -91,7 +130,7 @@ app.get("/", (req, res) => {
  * /health:
  *   get:
  *     summary: Health check
- *     description: Returns server status. Used to confirm the server is alive.
+ *     description: Returns server status.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -102,12 +141,185 @@ app.get("/health", (req, res) => {
   });
 });
 
+// ==================== AUTH ROUTES ====================
+
+/**
+ * @swagger
+ * /auth/signup:
+ *   post:
+ *     summary: Create a new user account
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *             example:
+ *               email: "test@example.com"
+ *               password: "password123"
+ *     responses:
+ *       201:
+ *         description: User created
+ *       400:
+ *         description: Missing email or password
+ */
+app.post("/auth/signup", async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      error: "Email and password are required"
+    });
+  }
+
+  const { data, error } = await supabase.auth.signUp({ email, password });
+
+  if (error) {
+    return res.status(400).json({
+      error: error.message
+    });
+  }
+
+  res.status(201).json(data.user);
+});
+
+/**
+ * @swagger
+ * /auth/login:
+ *   post:
+ *     summary: Log in and receive a JWT
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *             example:
+ *               email: "test@example.com"
+ *               password: "password123"
+ *     responses:
+ *       200:
+ *         description: Login successful, returns access token
+ *       400:
+ *         description: Missing email or password
+ *       401:
+ *         description: Invalid login credentials
+ */
+app.post("/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      error: "Email and password are required"
+    });
+  }
+
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    return res.status(401).json({
+      error: "Invalid login credentials"
+    });
+  }
+
+  res.status(200).json({
+    access_token: data.session.access_token,
+    refresh_token: data.session.refresh_token
+  });
+});
+
+/**
+ * @swagger
+ * /auth/logout:
+ *   post:
+ *     summary: Log out the current user
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       204:
+ *         description: Logged out successfully
+ *       401:
+ *         description: Missing, malformed, or invalid token
+ */
+app.post("/auth/logout", requireAuth, async (req, res) => {
+  await supabase.auth.signOut();
+  res.status(204).send();
+});
+
+// ==================== PUBLIC / PROTECTED DEMO ROUTES ====================
+
+/**
+ * @swagger
+ * /public/info:
+ *   get:
+ *     summary: Public info, no auth required
+ *     responses:
+ *       200:
+ *         description: Public message
+ */
+app.get("/public/info", (req, res) => {
+  res.status(200).json({
+    message: "Welcome stranger! This info is public."
+  });
+});
+
+/**
+ * @swagger
+ * /protected/profile:
+ *   get:
+ *     summary: Get the logged-in user's profile
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: User profile
+ *       401:
+ *         description: Missing, malformed, or invalid token
+ */
+app.get("/protected/profile", requireAuth, (req, res) => {
+  res.status(200).json({
+    id: req.user.id,
+    email: req.user.email,
+    created_at: req.user.created_at
+  });
+});
+
+/**
+ * @swagger
+ * /protected/dashboard:
+ *   get:
+ *     summary: Another protected route using the same middleware
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Dashboard data
+ *       401:
+ *         description: Missing, malformed, or invalid token
+ */
+app.get("/protected/dashboard", requireAuth, (req, res) => {
+  res.status(200).json({
+    message: `Welcome to your dashboard, ${req.user.email}!`
+  });
+});
+
+// ==================== TASK CRUD ROUTES ====================
+
 /**
  * @swagger
  * /tasks:
  *   get:
  *     summary: Get all tasks
- *     description: Returns the full list of tasks from PostgreSQL.
  *     responses:
  *       200:
  *         description: List of tasks
@@ -128,7 +340,6 @@ app.get("/tasks", async (req, res) => {
  *         required: true
  *         schema:
  *           type: integer
- *         description: The task id
  *     responses:
  *       200:
  *         description: The requested task
@@ -199,7 +410,6 @@ app.post("/tasks", async (req, res) => {
  *         required: true
  *         schema:
  *           type: integer
- *         description: The task id
  *     requestBody:
  *       required: true
  *       content:
@@ -211,9 +421,6 @@ app.post("/tasks", async (req, res) => {
  *                 type: string
  *               done:
  *                 type: boolean
- *             example:
- *               title: "Buy milk and bread"
- *               done: true
  *     responses:
  *       200:
  *         description: Task updated
@@ -260,7 +467,6 @@ app.put("/tasks/:id", async (req, res) => {
  *         required: true
  *         schema:
  *           type: integer
- *         description: The task id
  *     responses:
  *       204:
  *         description: Task deleted, no content returned
