@@ -1,5 +1,5 @@
 const express = require("express");
-const Database = require("better-sqlite3");
+const { Pool } = require("pg");
 
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
@@ -15,7 +15,7 @@ const options = {
     info: {
       title: "Task API",
       version: "1.0.0",
-      description: "Simple CRUD API with Express and SQLite"
+      description: "Simple CRUD API with Express and PostgreSQL"
     }
   },
   apis: ["./index.js"]
@@ -23,41 +23,35 @@ const options = {
 
 const swaggerSpec = swaggerJsdoc(options);
 
-// ---- Stage 0: create/open the database and table ----
-const db = new Database("tasks.db");
+// ---- Stage 1: connect to Postgres using DATABASE_URL from .env ----
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    done INTEGER NOT NULL DEFAULT 0
-  )
-`);
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      done BOOLEAN NOT NULL DEFAULT false
+    )
+  `);
 
-// Seed 3 example tasks, but only if the table is empty
-const row = db.prepare("SELECT COUNT(*) AS count FROM tasks").get();
-if (row.count === 0) {
-  const insertSeed = db.prepare("INSERT INTO tasks (title, done) VALUES (?, ?)");
-  const seedMany = db.transaction((seedTasks) => {
-    for (const t of seedTasks) {
-      insertSeed.run(t.title, t.done ? 1 : 0);
-    }
+  const { rows } = await pool.query("SELECT COUNT(*) AS count FROM tasks");
+  if (Number(rows[0].count) === 0) {
+    await pool.query(
+      "INSERT INTO tasks (title, done) VALUES ($1, $2), ($3, $4), ($5, $6)",
+      ["Study", false, "Gym", true, "Sleep", false]
+    );
+  }
+}
+
+initDb()
+  .then(() => console.log("Database ready"))
+  .catch((err) => {
+    console.error("Failed to initialize database:", err);
+    process.exit(1);
   });
-  seedMany([
-    { title: "Study", done: false },
-    { title: "Gym", done: true },
-    { title: "Sleep", done: false }
-  ]);
-}
-
-// Helper: convert a DB row (done as 0/1) into the same shape the API returned before (done as true/false)
-function toApiTask(row) {
-  return {
-    id: row.id,
-    title: row.title,
-    done: !!row.done
-  };
-}
 
 /**
  * @swagger
@@ -98,14 +92,14 @@ app.get("/health", (req, res) => {
  * /tasks:
  *   get:
  *     summary: Get all tasks
- *     description: Returns the full list of tasks from the SQLite database.
+ *     description: Returns the full list of tasks from PostgreSQL.
  *     responses:
  *       200:
  *         description: List of tasks
  */
-app.get("/tasks", (req, res) => {
-  const rows = db.prepare("SELECT * FROM tasks").all();
-  res.status(200).json(rows.map(toApiTask));
+app.get("/tasks", async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM tasks ORDER BY id");
+  res.status(200).json(rows);
 });
 
 /**
@@ -126,18 +120,18 @@ app.get("/tasks", (req, res) => {
  *       404:
  *         description: Task not found
  */
-app.get("/tasks/:id", (req, res) => {
+app.get("/tasks/:id", async (req, res) => {
   const taskId = Number(req.params.id);
 
-  const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+  const { rows } = await pool.query("SELECT * FROM tasks WHERE id = $1", [taskId]);
 
-  if (!row) {
+  if (rows.length === 0) {
     return res.status(404).json({
       error: `Task ${taskId} not found`
     });
   }
 
-  res.status(200).json(toApiTask(row));
+  res.status(200).json(rows[0]);
 });
 
 /**
@@ -162,7 +156,7 @@ app.get("/tasks/:id", (req, res) => {
  *       400:
  *         description: Invalid or missing title
  */
-app.post("/tasks", (req, res) => {
+app.post("/tasks", async (req, res) => {
   const { title } = req.body;
 
   if (typeof title !== "string" || title.trim() === "") {
@@ -171,12 +165,12 @@ app.post("/tasks", (req, res) => {
     });
   }
 
-  const insert = db.prepare("INSERT INTO tasks (title, done) VALUES (?, ?)");
-  const result = insert.run(title.trim(), 0);
+  const { rows } = await pool.query(
+    "INSERT INTO tasks (title, done) VALUES ($1, $2) RETURNING *",
+    [title.trim(), false]
+  );
 
-  const newTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
-
-  res.status(201).json(toApiTask(newTask));
+  res.status(201).json(rows[0]);
 });
 
 /**
@@ -213,12 +207,12 @@ app.post("/tasks", (req, res) => {
  *       404:
  *         description: Task not found
  */
-app.put("/tasks/:id", (req, res) => {
+app.put("/tasks/:id", async (req, res) => {
   const taskId = Number(req.params.id);
 
-  const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+  const existing = await pool.query("SELECT * FROM tasks WHERE id = $1", [taskId]);
 
-  if (!existing) {
+  if (existing.rows.length === 0) {
     return res.status(404).json({
       error: `Task ${taskId} not found`
     });
@@ -232,15 +226,12 @@ app.put("/tasks/:id", (req, res) => {
     });
   }
 
-  db.prepare("UPDATE tasks SET title = ?, done = ? WHERE id = ?").run(
-    title.trim(),
-    done ? 1 : 0,
-    taskId
+  const { rows } = await pool.query(
+    "UPDATE tasks SET title = $1, done = $2 WHERE id = $3 RETURNING *",
+    [title.trim(), !!done, taskId]
   );
 
-  const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
-
-  res.json(toApiTask(updated));
+  res.json(rows[0]);
 });
 
 /**
@@ -261,18 +252,18 @@ app.put("/tasks/:id", (req, res) => {
  *       404:
  *         description: Task not found
  */
-app.delete("/tasks/:id", (req, res) => {
+app.delete("/tasks/:id", async (req, res) => {
   const taskId = Number(req.params.id);
 
-  const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+  const existing = await pool.query("SELECT * FROM tasks WHERE id = $1", [taskId]);
 
-  if (!existing) {
+  if (existing.rows.length === 0) {
     return res.status(404).json({
       error: `Task ${taskId} not found`
     });
   }
 
-  db.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
+  await pool.query("DELETE FROM tasks WHERE id = $1", [taskId]);
 
   res.status(204).send();
 });
