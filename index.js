@@ -28,7 +28,22 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
 
+async function connectWithRetry(maxAttempts = 10, delayMs = 2000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await pool.query("SELECT 1");
+      return;
+    } catch (err) {
+      console.log(`Database not ready yet (attempt ${attempt}/${maxAttempts})...`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error("Could not connect to the database after multiple attempts");
+}
+
 async function initDb() {
+  await connectWithRetry();
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (
       id SERIAL PRIMARY KEY,
