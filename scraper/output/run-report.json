@@ -1,0 +1,20 @@
+{
+  "started_at": "2026-08-12T00:39:42.671Z",
+  "finished_at": "2026-08-12T00:40:45.430Z",
+  "duration_ms": 62759,
+  "pages_fetched": 63,
+  "catalogue_pages": 3,
+  "detail_pages": 60,
+  "discovered": 60,
+  "unique_urls": 60,
+  "cache_hits": 3,
+  "valid_records": 60,
+  "invalid_records": 0,
+  "failed_pages": 1,
+  "failed_urls": [
+    {
+      "product_url": "https://books.toscrape.com/catalogue/this-book-does-not-exist_999999/index.html",
+      "error": "Book fetch failed with status 404"
+    }
+  ]
+}
